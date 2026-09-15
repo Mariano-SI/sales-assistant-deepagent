@@ -42,4 +42,4 @@ for i in $(seq 1 10); do
 done
 
 echo "Mail server up (PID $MAIL_PID). Starting langgraph dev ..."
-poetry run langgraph dev "$@"
+poetry run langgraph dev --allow-blocking "$@"
