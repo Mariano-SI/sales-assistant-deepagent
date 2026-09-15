@@ -15,7 +15,14 @@ from __future__ import annotations
 from mail_store import load_store, next_id, save_store
 from mcp.server.fastmcp import FastMCP
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 mcp = FastMCP("mock-mail", host="127.0.0.1", port=5002)
+
+@mcp.custom_route("/ping", methods=["GET"])
+async def ping(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "pong"})
 
 
 @mcp.tool()
