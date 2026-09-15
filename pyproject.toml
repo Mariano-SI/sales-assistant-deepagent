@@ -1,0 +1,18 @@
+[project]
+name = "sales-assisant-deepagent"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Mariano-SI",email = "mariano.silva@ufvjm.edu.br"}
+]
+requires-python = ">=3.12,<4.0"
+dependencies = [
+    "deepagents (>=0.7.14,<0.8.0)",
+    "langchain-mcp-adapters (>=0.3.2,<0.4.0)",
+    "langchain-quickjs (>=0.3.7,<0.4.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
