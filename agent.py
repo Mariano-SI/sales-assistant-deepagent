@@ -17,6 +17,8 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_quickjs import CodeInterpreterMiddleware
+from tools.chart import render_pie_chart
+from tools.html import markdown_to_html
 
 from models import strong_model
 
@@ -45,7 +47,7 @@ async def make_graph():
 
     return create_deep_agent(
         model=strong_model,
-        tools=mail_tools,
+        tools=[*mail_tools, render_pie_chart, markdown_to_html],
         system_prompt=SYSTEM_PROMPT,
         skills=["/skills"],
         memory=["/AGENTS.md"],
