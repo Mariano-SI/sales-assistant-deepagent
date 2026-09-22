@@ -3,3 +3,9 @@
 todo.md
 __pycache__/
 *.pyc
+.mail.pid
+.mail.log
+
+# Notas de arquitetura / explicações — ficam só no disco.
+DOCS.md
+api/README.md
