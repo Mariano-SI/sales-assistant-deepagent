@@ -15,6 +15,7 @@ Dois ajustes importantes em relação ao template padrão:
 """
 
 import asyncio
+import sys
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -90,6 +91,12 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
+    # psycopg (v3) em modo async NÃO funciona com o ProactorEventLoop,
+    # que é o loop padrão do asyncio no Windows. Forçamos o
+    # SelectorEventLoop, que é compatível. Em Linux/macOS nada muda.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     asyncio.run(run_async_migrations())
 
 
