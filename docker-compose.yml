@@ -1,0 +1,28 @@
+# Banco de verdade para a API conversacional.
+#
+#   docker compose up -d      # sobe o Postgres
+#   docker compose down       # para (mantém os dados no volume)
+#   docker compose down -v    # para e APAGA os dados
+#
+# A porta 5433 no host evita conflito com um Postgres instalado localmente.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sales-assistant-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sales
+      POSTGRES_PASSWORD: sales
+      POSTGRES_DB: sales_assistant
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sales -d sales_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
