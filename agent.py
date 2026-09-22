@@ -3,8 +3,12 @@
 Uses a local FilesystemBackend, a QuickJS code interpreter for arithmetic
 and data prep, and a dedicated chart tool for rendering.
 
+Ponto de entrada único: `build_agent(checkpointer=...)`, usado pela API
+(api/agent_runtime.py), que passa um AsyncPostgresSaver para o estado viver no
+Postgres. Sem checkpointer o agent roda, mas esquece tudo entre invocações.
+
 Start with:
-    ./start.sh
+    make up
 """
 
 from __future__ import annotations
@@ -17,11 +21,13 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_quickjs import CodeInterpreterMiddleware
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph.state import CompiledStateGraph
 from tools.chart import render_pie_chart
 from tools.html import markdown_to_html
 
-from subagents import build_subagents
 from models import strong_model
+from subagents import build_subagents
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +39,8 @@ SYSTEM_PROMPT = (
     "from your memory) and use the matching playbook from /skills/ for each task."
 )
 
-MAIL_SERVER = {"transport": "streamable-http", "url": "http://127.0.0.1:5002/mcp"}
+MAIL_SERVER_URL = os.environ.get("MAIL_SERVER_URL", "http://127.0.0.1:5002/mcp")
+MAIL_SERVER = {"transport": "streamable-http", "url": MAIL_SERVER_URL}
 
 _enable_search = bool(os.environ.get("TAVILY_API_KEY"))
 if not _enable_search:
@@ -41,19 +48,43 @@ if not _enable_search:
 
 _backend = FilesystemBackend(root_dir=str(HERE), virtual_mode=True)
 
-async def make_graph():
-    mcp_client = MultiServerMCPClient({"email-server":MAIL_SERVER})
 
-    mail_tools = await mcp_client.get_tools()
+async def _load_mail_tools() -> list:
+    """Descobre as tools do servidor MCP de e-mail.
+
+    Falha de forma suave: o servidor de mail é um processo à parte, e a API não
+    deve deixar de subir só porque ele está fora do ar. Sem ele o agent perde as
+    tools de e-mail, mas continua respondendo sobre a base Chinook.
+    """
+    try:
+        client = MultiServerMCPClient({"email-server": MAIL_SERVER})
+        return await client.get_tools()
+    except Exception:
+        logger.warning(
+            "Mail MCP server unreachable at %s — email tools disabled.",
+            MAIL_SERVER_URL,
+        )
+        return []
+
+
+async def build_agent(
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
+    """Compila o agent. Passe um checkpointer para o estado sobreviver ao processo."""
+    mail_tools = await _load_mail_tools()
 
     return create_deep_agent(
         model=strong_model,
         tools=[*mail_tools, render_pie_chart, markdown_to_html],
         system_prompt=SYSTEM_PROMPT,
         skills=["/skills"],
-        subagents=build_subagents(_backend, enable_search=_enable_search, mail_tools=mail_tools),
+        subagents=build_subagents(
+            _backend, enable_search=_enable_search, mail_tools=mail_tools
+        ),
         memory=["/AGENTS.md"],
         backend=_backend,
         middleware=[CodeInterpreterMiddleware()],
+        checkpointer=checkpointer,
         name="chinook-sales-assistant",
-    ).with_config({"recursion_limit":50})
+    )
+

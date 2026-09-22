@@ -6,8 +6,8 @@ Exposes three tools over HTTP (streamable-http transport) on port 5002:
     mail_read_message(message_id)        -> the full body of one message
     mail_create_draft(to, subject, body) -> save a reply to the drafts folder
 
-State is a small JSON file managed by mail_store.py. Started by start.sh
-before langgraph dev so make_graph() can discover the tools at startup.
+State is a small JSON file managed by mail_store.py. Started by `make mail`
+before the API, so build_agent() can discover the tools at startup.
 """
 
 from __future__ import annotations
