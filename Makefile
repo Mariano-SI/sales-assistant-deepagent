@@ -1,8 +1,9 @@
 # Stack local do Chinook Sales Assistant.
 #
-#   make up        sobe tudo (Postgres -> migrations -> mail server -> API)
-#   make down      derruba mail server e Postgres
-#   make help      lista os alvos
+#   make stack       sobe TUDO, incluindo o front (Postgres, mail, API, Vite)
+#   make stack-stop  derruba tudo que o `stack` subiu
+#   make up          só o backend (API em foreground, sem front)
+#   make help        lista os alvos
 #
 # Windows: rode pelo Git Bash. As receitas são POSIX (o cmd.exe não entende
 # `for`, `[ -f ]` nem `&&` desta forma).
@@ -11,13 +12,15 @@ SHELL := bash
 .DEFAULT_GOAL := help
 
 PY        := poetry run
+FRONT_DIR := frontend
 MAIL_PORT := 5002
 MAIL_URL  := http://127.0.0.1:$(MAIL_PORT)
 API_HOST  ?= 127.0.0.1
 API_PORT  ?= 8000
 
 .PHONY: help install check-env db-up db-down db-reset db-logs psql \
-        migrate revision mail mail-stop mail-logs api up down smoke clean
+        migrate revision mail mail-stop mail-logs api up down smoke clean \
+        front front-install front-build stack stack-stop
 
 help:  ## Lista os alvos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -96,10 +99,56 @@ mail-logs:  ## Segue o log do mail server
 	@tail -f .mail.log
 
 # --------------------------------------------------------------------- API
-api: check-env  ## Sobe a API (uvicorn com --reload)
-	$(PY) uvicorn api.main:app --reload --host $(API_HOST) --port $(API_PORT)
+# Via run_api.py, e não `uvicorn` direto: no Windows o uvicorn sem --reload
+# escolhe o ProactorEventLoop, incompatível com o psycopg async. Ver run_api.py.
+api: check-env  ## Sobe a API com --reload (foreground)
+	$(PY) python run_api.py --reload
 
-up: db-up migrate mail api  ## Sobe a stack inteira e deixa a API em foreground
+up: db-up migrate mail api  ## Sobe backend inteiro e deixa a API em foreground
+
+# ---------------------------------------------------------------- frontend
+front-install:  ## Instala as dependências do front (só na primeira vez)
+	@cd $(FRONT_DIR) && npm install
+
+front: front-install  ## Sobe o Vite em foreground (precisa da API no ar)
+	@cd $(FRONT_DIR) && npm run dev
+
+front-build:  ## Build de produção do front (typecheck + bundle em frontend/dist)
+	@cd $(FRONT_DIR) && npm run build
+
+# ------------------------------------------------------------ tudo junto
+# `up` deixa a API em foreground, então ela não pode ser uma dependência daqui:
+# o make nunca chegaria ao alvo do front. Por isso a API sobe em BACKGROUND e o
+# Vite fica em foreground — é nele que você quer ver o log enquanto mexe na UI.
+stack: db-up migrate mail front-install  ## Sobe tudo: Postgres, mail, API (bg) e front (fg)
+	@if curl -s --max-time 1 http://$(API_HOST):$(API_PORT)/health >/dev/null 2>&1; then \
+		echo ">> API já está no ar em :$(API_PORT)"; \
+	else \
+		rm -f .api.pid; \
+		echo ">> subindo API em :$(API_PORT) ..."; \
+		$(PY) python run_api.py > .api.log 2>&1 & echo $$! > .api.pid; \
+		for i in $$(seq 1 40); do \
+			if curl -s --max-time 1 http://$(API_HOST):$(API_PORT)/health >/dev/null 2>&1; then \
+				echo ">> API up (pid $$(cat .api.pid))"; break; \
+			fi; \
+			if [ $$i -eq 40 ]; then echo ">> API não respondeu em 40s — veja .api.log"; exit 1; fi; \
+			sleep 1; \
+		done; \
+	fi
+	@echo ""
+	@echo ">> tudo no ar. front em http://localhost:5173 (Ctrl+C encerra só o Vite)"
+	@echo ">> depois, rode 'make stack-stop' para derrubar API, mail e Postgres."
+	@echo ""
+	@cd $(FRONT_DIR) && npm run dev
+
+stack-stop: down  ## Derruba API, mail server e Postgres
+	@if [ -f .api.pid ]; then \
+		PID=$$(cat .api.pid); \
+		kill $$PID 2>/dev/null || taskkill //PID $$PID //F >/dev/null 2>&1 || true; \
+		rm -f .api.pid; echo ">> API parada"; \
+	else \
+		echo ">> nenhum .api.pid — nada para parar"; \
+	fi
 
 down: mail-stop db-down  ## Derruba mail server e Postgres
 
