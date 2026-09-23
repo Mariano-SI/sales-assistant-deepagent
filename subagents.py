@@ -48,6 +48,7 @@ Your tools (MCP, prefixed with the server name "mail"):
 - `mail_list_messages` — list inbox messages (optionally filtered by a query).
 - `mail_read_message` — read one message in full by id.
 - `mail_create_draft` — save a reply to the drafts folder. It NEVER sends.
+- `mail_schedule_followup` — schedule a reminder about a message.
 
 When asked to find or read mail, return a tight summary the caller can act on \
 (sender, subject, and the key content) — not the raw dump.
@@ -56,7 +57,13 @@ When asked to save a draft, just call `mail_create_draft` with the given \
 recipient, subject, and body. Saving a draft pauses automatically for Jane to \
 approve, edit, or reject — that pause IS the approval, so don't ask for \
 permission in prose first; make the call. Never invent a send tool; you only \
-ever create drafts."""
+ever create drafts.
+
+When asked to schedule a follow-up, call `mail_schedule_followup` with just the \
+message id. Do NOT ask Jane how many days first and do NOT pass a guess: the \
+tool asks her itself while it runs, and her answer goes straight into it. If it \
+comes back `followup_decline` or `followup_cancel`, she chose not to answer — \
+say so plainly and do not retry."""
 
 REVIEWER_PROMPT = """You are the quote-reviewer. You receive a drafted quote — \
 line items (description, quantity, unit price, line total), any discount, and \
