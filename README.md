@@ -1,33 +1,45 @@
 # Chinook Sales Assistant
 
 Assistente de vendas construído com [deepagents](https://github.com/langchain-ai/deepagents)
-sobre LangGraph, exposto como uma API HTTP conversacional. Ele trabalha para
-**Jane Peacock**, representante de vendas da Chinook (uma distribuidora de música
-fictícia): responde pedidos de cotação que chegam por e-mail, consulta e cadastra
-clientes, gera relatórios do território e monta a newsletter semanal.
+sobre LangGraph, exposto como uma API HTTP conversacional e uma interface de
+chat em React. Ele trabalha para **Jane Peacock**, representante de vendas da
+Chinook (uma distribuidora de música fictícia): responde pedidos de cotação que
+chegam por e-mail, consulta e cadastra clientes, gera relatórios do território e
+monta a newsletter semanal.
 
 O agent assiste — a Jane decide. Toda ação com efeito externo (salvar um rascunho
 de e-mail, cadastrar um cliente) **pausa a conversa** e espera aprovação humana.
+E há uma segunda forma de pausa, vinda do protocolo MCP, em que o próprio
+servidor interrompe a execução para perguntar algo — as duas são comparadas
+[mais abaixo](#as-duas-formas-de-o-agent-parar-e-perguntar).
 
 ---
 
 ## Como funciona
 
 ```
-                 ┌──────────────────────── FastAPI (api/) ────────────────────────┐
-  cliente ──────►│  /chat  /chat/stream  /chat/resume  /conversations             │
-                 │        │                                                       │
-                 │        ▼                                                       │
-                 │   grafo compilado (um só, criado no startup)                   │
-                 │   agent principal  ──task──►  subagents                        │
-                 └────────┬───────────────────────────┬───────────────────────────┘
-                          │                           │
-              ┌───────────▼──────────┐     ┌──────────▼───────────┐   ┌───────────────┐
-              │ Postgres             │     │ data/chinook.db      │   │ mail server   │
-              │  checkpoints (agent) │     │ (SQLite, negócio)    │   │ MCP :5002     │
-              │  conversations/msgs  │     └──────────────────────┘   └───────────────┘
-              └──────────────────────┘
+  ┌─ frontend/ (React+Vite :5173) ─┐
+  │  chat, sidebar, painéis de     │   SSE (tokens, tools, pausas)
+  │  aprovação e de elicitation    │◄──────────────┐
+  └────────────┬───────────────────┘               │
+               │ POST /chat/stream                 │
+               │      /chat/resume/stream          │
+               │      /chat/elicit                 │
+               ▼                                   │
+  ┌──────────────────────── FastAPI (api/) ────────┴───────────────┐
+  │  grafo compilado (um só, criado no startup)                    │
+  │  agent principal  ──task──►  subagents                         │
+  └────────┬───────────────────────────┬──────────────────┬────────┘
+           │                           │                  │
+┌──────────▼───────────┐   ┌───────────▼──────────┐   ┌───▼───────────┐
+│ Postgres             │   │ data/chinook.db      │   │ mail server   │
+│  checkpoints (agent) │   │ (SQLite, negócio)    │   │ MCP :5002     │
+│  conversations/msgs  │   └──────────────────────┘   └───────────────┘
+└──────────────────────┘
 ```
+
+O front não fala com nada além da API, e a API é o único processo que fala com
+o Postgres, com o SQLite e com o servidor MCP.
 
 ### O agent
 
@@ -37,7 +49,7 @@ especialistas, e dois deles são o único caminho até um sistema externo:
 | Subagent | Faz | Modelo |
 |---|---|---|
 | `chinook-analyst` | Todo acesso ao banco: preços, clientes, histórico de compras, métricas do território, cadastro de cliente | `gpt-4.1-mini` |
-| `inbox-manager` | Todo acesso ao e-mail: busca e lê mensagens, salva rascunhos de resposta | `gpt-4.1-mini` |
+| `inbox-manager` | Todo acesso ao e-mail: busca e lê mensagens, salva rascunhos de resposta, agenda follow-ups | `gpt-4.1-mini` |
 | `quote-reviewer` | Revisa itens, desconto e total de uma cotação antes de ela sair | `gpt-4.1` |
 | `genre-researcher` | Pesquisa um gênero musical na web para a newsletter (só com `TAVILY_API_KEY`) | `gpt-4.1-mini` |
 
@@ -68,12 +80,35 @@ Consequência prática: o cliente manda **só a mensagem nova**, nunca o histór
 O checkpointer recarrega o resto. Conversas longas são compactadas
 automaticamente pelo middleware de summarização do deepagents.
 
-### Aprovação humana (interrupts)
+### As duas formas de o agent parar e perguntar
 
-`add_customer` e `mail_create_draft` exigem aprovação. Quando o agent chega numa
-delas, o turno termina com `status: "interrupted"` e a thread fica parada no
-checkpoint — pode esperar indefinidamente, inclusive atravessando um restart da
-API. A conversa só continua quando o cliente chama `POST /chat/resume`.
+O agent pode suspender à espera de um humano por **dois mecanismos distintos**,
+e confundi-los é a principal armadilha deste projeto.
+
+| | **Interrupt (HITL)** | **Elicitation (MCP)** |
+|---|---|---|
+| De quem é o conceito | LangGraph, no cliente | protocolo MCP, no servidor |
+| Quando pausa | **antes** de a tool rodar | **dentro** dela, já rodando |
+| Quem decidiu pausar | quem montou o agent (`interrupt_on`) | quem escreveu o servidor MCP |
+| Onde fica o estado | checkpoint no Postgres | memória do processo da API |
+| O turno | **termina** (`status: "interrupted"`) | continua **aberto** |
+| Como responder | `POST /chat/resume[/stream]` | `POST /chat/elicit` |
+| Sobrevive a um restart | **sim** | **não** |
+
+**Interrupt** — `add_customer` e `mail_create_draft` exigem aprovação. A thread
+fica parada no checkpoint e pode esperar indefinidamente, inclusive atravessando
+um restart da API. É aqui que o checkpointer mostra serviço.
+
+**Elicitation** — `mail_schedule_followup` recebe só o id da mensagem e, no meio
+da execução, pergunta à Jane em quantos dias fazer o follow-up. A tool fica
+suspensa num `await ctx.elicit(...)` dentro do servidor MCP; a API segura a
+espera num `asyncio.Future` (`api/elicitation.py`) e emite a pergunta pelo
+stream. Por isso ela **só funciona em `/chat/stream`**: no `POST /chat` não há
+canal para entregá-la, e a resposta é `decline` — o que é o correto num job ou
+webhook, onde não há ninguém para perguntar.
+
+A comparação detalhada, com o que cada uma exige da UI, está em
+[`frontend/README.md`](frontend/README.md).
 
 ---
 
@@ -158,7 +193,9 @@ A comparação completa está em [`frontend/README.md`](frontend/README.md).
 |---|---|
 | `POST /chat` | Envia uma mensagem e espera a resposta completa. Sem `session_id` = conversa nova |
 | `POST /chat/stream` | O mesmo, em Server-Sent Events |
-| `POST /chat/resume` | Responde a um interrupt: `approve`, `edit` ou `reject` |
+| `POST /chat/resume` | Responde a um interrupt, resposta completa |
+| `POST /chat/resume/stream` | Responde a um interrupt e retoma **em streaming** — é o que a UI usa |
+| `POST /chat/elicit` | Responde a uma elicitation em voo (`202`, ou `409` se já expirou) |
 | `POST /conversations` | Cria uma conversa vazia |
 | `GET /conversations` | Lista conversas, mais recentes primeiro (`?limit=50&offset=0`) |
 | `GET /conversations/{id}` | Conversa + histórico de mensagens |
@@ -205,7 +242,9 @@ Eventos, nesta ordem:
 | `session` | `{session_id, title}` | Sempre o primeiro |
 | `tool` | `{name}` | O agent chamou uma tool — útil para mostrar "consultando o banco..." |
 | `token` | `{content}` | Pedaço do texto da resposta |
-| `interrupt` | `{interrupt}` | Parou pedindo aprovação humana |
+| `interrupt` | `{interrupt}` | Parou pedindo aprovação humana — o turno **termina** logo depois |
+| `elicitation` | `{elicitation_id, tool, message, schema}` | O servidor MCP está perguntando — o turno **continua** |
+| `elicitation_closed` | `{elicitation_id}` | A pergunta foi respondida ou expirou |
 | `done` | `{status, message_id}` | Fim do turno |
 | `error` | `{detail}` | Falhou no meio do stream |
 
@@ -214,28 +253,62 @@ inclui os dos subagents.
 
 ### Respondendo a um interrupt
 
-Quando `status` vem `"interrupted"`, o campo `interrupt` traz a ação que o agent
-quer executar. Responda com uma de três decisões:
+Quando `status` vem `"interrupted"`, o campo `interrupt` traz as ações que o
+agent quer executar:
+
+```jsonc
+{"interrupt": [{"id": "8f3c…", "value": {
+  "action_requests": [{"name": "add_customer", "args": {"first_name": "Ana", …}}],
+  "review_configs":  [{"action_name": "add_customer",
+                       "allowed_decisions": ["approve", "edit", "reject"]}]}}]}
+```
+
+**`decisions` é uma lista, e isso não é estilo — é exigência.**
+`action_requests` também é lista: o modelo pode pedir várias tool calls no mesmo
+passo, e o middleware exige **uma decisão por ação, na mesma ordem**, levantando
+`ValueError` se o número não bater.
 
 ```bash
 # aprovar como está
 curl -s localhost:8000/chat/resume -H 'content-type: application/json' \
-  -d '{"session_id": "3f2b1c9e-...", "decision": "approve"}'
+  -d '{"session_id": "3f2b1c9e-...", "decisions": [{"type": "approve"}]}'
 
-# aprovar com argumentos corrigidos — args traz o nome da tool e os novos argumentos
+# aprovar com argumentos corrigidos
 curl -s localhost:8000/chat/resume -H 'content-type: application/json' \
-  -d '{"session_id": "3f2b1c9e-...", "decision": "edit",
-       "args": {"name": "mail_create_draft",
-                "args": {"to": "cliente@exemplo.com", "subject": "Sua cotação", "body": "..."}}}'
+  -d '{"session_id": "3f2b1c9e-...", "decisions": [
+        {"type": "edit", "name": "mail_create_draft",
+         "args": {"to": "cliente@exemplo.com", "subject": "Sua cotação", "body": "..."}}]}'
 
 # recusar, explicando o motivo ao agent
 curl -s localhost:8000/chat/resume -H 'content-type: application/json' \
-  -d '{"session_id": "3f2b1c9e-...", "decision": "reject",
-       "message": "O desconto não pode passar de 10%."}'
+  -d '{"session_id": "3f2b1c9e-...", "decisions": [
+        {"type": "reject", "message": "O desconto não pode passar de 10%."}]}'
 ```
+
+Há um quarto tipo, `respond`: a tool **não** roda e o texto volta ao modelo como
+se fosse o retorno dela — para tools do tipo "pergunte ao usuário". Nenhum gate
+do projeto o habilita hoje (`subagents.py`), e habilitá-lo numa tool de escrita
+seria arriscado: o modelo acreditaria que o cadastro aconteceu sem que nenhuma
+linha fosse gravada.
 
 A resposta tem o mesmo formato de `POST /chat` — e pode vir `interrupted` de novo,
 se o agent precisar de outra aprovação na sequência.
+
+### Respondendo a uma elicitation
+
+Chega pelo evento `elicitation`, **sem** encerrar o turno. Responder não retoma
+nada: só destrava a tool que está suspensa do outro lado.
+
+```bash
+curl -s localhost:8000/chat/elicit -H 'content-type: application/json' \
+  -d '{"elicitation_id": "8561ec5f-...", "action": "accept",
+       "content": {"days": 7, "note": "cobrar retorno da cotação"}}'
+```
+
+`action` aceita `accept`, `decline` e `cancel` — os três voltam para dentro da
+tool, que decide o que fazer. Uma elicitation recusada é um **desfecho normal**,
+não um erro. O `409` significa que a pergunta já expirou (`ELICITATION_TIMEOUT`)
+ou já foi respondida.
 
 ---
 
@@ -253,15 +326,21 @@ Variáveis lidas do ambiente, com o `.env` como fallback (modelo em `.env.exampl
 | `MAIL_SERVER_URL` | `http://127.0.0.1:5002/mcp` | Servidor MCP de e-mail |
 | `STREAM_SUBAGENT_TOKENS` | `false` | Emitir tokens dos subagents no streaming |
 | `RECURSION_LIMIT` | `50` | Máximo de passos do grafo por turno — trava contra o agent entrar em loop |
+| `ELICITATION_TIMEOUT` | `300` | Segundos que uma elicitation espera por resposta. Precisa existir: essa pausa vive na memória, não no checkpoint — sem timeout, fechar a aba deixaria a tool call aberta para sempre |
+
+O front não precisa de variável nenhuma: o Vite faz proxy de `/api` para a API
+(`frontend/vite.config.ts`). O `CORS_ORIGINS` fica como rede de segurança, para
+quem preferir apontar `VITE_API_URL` direto.
 
 ---
 
 ## Estrutura
 
 ```
-agent.py            Monta o agent principal — build_agent(checkpointer=...)
+agent.py            Monta o agent principal — build_agent(checkpointer=..., on_elicitation=...)
 subagents.py        Os quatro especialistas e quais tools exigem aprovação
 models.py           Modelos de LLM (gpt-4.1-mini e gpt-4.1)
+run_api.py          Launcher da API — escolhe o event loop certo no Windows
 tools/              sql.py, chart.py, html.py, search.py
 skills/             Playbooks que o agent lê sob demanda
 AGENTS.md           Manual de operação, carregado como memória do agent
@@ -274,10 +353,16 @@ api/
   agent_runtime.py  Dono do grafo compilado e do pool do checkpointer
   routers/          chat.py e conversations.py
   service.py        Executa um turno (inteiro ou em streaming) e trata interrupts
+  elicitation.py    Ponte entre o callback de elicitation do MCP e o browser
   schemas.py        Contratos HTTP (Pydantic), separados dos models do banco
   models.py         Tabelas de produto (SQLAlchemy)
   repository.py     Acesso a conversations/messages
   config.py         Settings lidas do ambiente
+
+frontend/           Chat em React + Vite + TS (ver frontend/README.md)
+  src/api.ts        Única camada que fala HTTP: REST + parser de SSE
+  src/App.tsx       Estado da conversa e o consumidor de stream
+  src/components/   Sidebar, mensagens, e os dois painéis de pausa
 
 migrations/         Alembic — só as tabelas de produto; as do LangGraph ficam de fora
 ```
@@ -287,10 +372,25 @@ migrations/         Alembic — só as tabelas de produto; as do LangGraph ficam
 ## Problemas comuns
 
 **`Psycopg cannot use the 'ProactorEventLoop'`** — o psycopg 3 async não funciona
-com o event loop padrão do Windows. O Alembic já força o loop compatível
-(`migrations/env.py`), e o uvicorn usa o loop certo quando roda com `--reload`,
-que é o que `make api` faz. Se você rodar o uvicorn na mão no Windows, mantenha o
-`--reload` (ou passe `--workers 2`).
+com o event loop padrão do Windows. Os alvos do Makefile já resolvem: o Alembic
+força o loop compatível (`migrations/env.py`) e a API sobe por `run_api.py`.
+
+Se você chamar `uvicorn` na mão no Windows, vai bater nisso — a API morre no
+boot com `PoolTimeout` ao abrir o pool do checkpointer. A causa está em
+`uvicorn/loops/asyncio.py`: sem `--reload` ele escolhe `ProactorEventLoop`; com
+`--reload` cai no `SelectorEventLoop` e funciona *por acidente*. Use
+`python run_api.py` (com ou sem `--reload`) em vez do uvicorn direto.
+
+**O agent diz que não consegue ver e-mail / a tool de follow-up não existe** — o
+servidor MCP não estava no ar quando a API subiu. `build_agent()` descobre as
+tools MCP no startup; se ele não responde, o agent compila sem elas e a API sobe
+assim mesmo, deixando só um `WARNING` no log. Suba o mail server (`make mail`) e
+**reinicie a API**.
+
+**O agent pede confirmação em prosa e nada é criado** — o `AGENTS.md` instrui a
+chamar a tool diretamente, porque a pausa de aprovação *é* o pedido de
+permissão. O modelo às vezes ignora isso e responde "vou enviar para a Jane
+aprovar" sem chamar tool nenhuma. Responder "confirmo" costuma destravar.
 
 **`make: command not found` logo depois de instalar** — o terminal aberto não
 recarregou o `PATH`. Feche e abra o Git Bash de novo.
