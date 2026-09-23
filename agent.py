@@ -19,6 +19,7 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
+from langchain_mcp_adapters.callbacks import Callbacks, ElicitationCallback
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -49,15 +50,24 @@ if not _enable_search:
 _backend = FilesystemBackend(root_dir=str(HERE), virtual_mode=True)
 
 
-async def _load_mail_tools() -> list:
+async def _load_mail_tools(on_elicitation: ElicitationCallback | None) -> list:
     """Descobre as tools do servidor MCP de e-mail.
 
     Falha de forma suave: o servidor de mail é um processo à parte, e a API não
     deve deixar de subir só porque ele está fora do ar. Sem ele o agent perde as
     tools de e-mail, mas continua respondendo sobre a base Chinook.
+
+    `on_elicitation` é quem responde quando uma tool do servidor pergunta algo
+    no meio da execução (`mail_schedule_followup`). Ele é INJETADO em vez de
+    importado: assim este módulo continua sem saber que existe uma API HTTP, e
+    quem roda o agent decide como consultar o humano — pelo browser (a ponte em
+    api/elicitation.py), por um prompt no terminal, ou por nada (recusa).
     """
     try:
-        client = MultiServerMCPClient({"email-server": MAIL_SERVER})
+        client = MultiServerMCPClient(
+            {"email-server": MAIL_SERVER},
+            callbacks=Callbacks(on_elicitation=on_elicitation),
+        )
         return await client.get_tools()
     except Exception:
         logger.warning(
@@ -69,9 +79,10 @@ async def _load_mail_tools() -> list:
 
 async def build_agent(
     checkpointer: BaseCheckpointSaver | None = None,
+    on_elicitation: ElicitationCallback | None = None,
 ) -> CompiledStateGraph:
     """Compila o agent. Passe um checkpointer para o estado sobreviver ao processo."""
-    mail_tools = await _load_mail_tools()
+    mail_tools = await _load_mail_tools(on_elicitation)
 
     return create_deep_agent(
         model=strong_model,

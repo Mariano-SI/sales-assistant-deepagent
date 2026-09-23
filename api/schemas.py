@@ -20,14 +20,55 @@ class ChatRequest(BaseModel):
     session_id: uuid.UUID | None = None
 
 
+class DecisionIn(BaseModel):
+    """Uma decisão humana sobre UMA tool call que o agent quis fazer.
+
+    Os quatro tipos vêm do HumanInTheLoopMiddleware do LangChain:
+
+    | type      | o que acontece com a tool          | campo usado        |
+    |-----------|------------------------------------|--------------------|
+    | `approve` | roda como o modelo pediu           | —                  |
+    | `edit`    | roda com os args que o humano deu  | `name` + `args`    |
+    | `reject`  | NÃO roda; o modelo recebe o motivo | `message`          |
+    | `respond` | NÃO roda; o humano responde por ela| `message`          |
+
+    `respond` é o menos óbvio: em vez de rodar a tool, a resposta do humano
+    volta para o modelo como se FOSSE o retorno dela. Serve para tools do tipo
+    "pergunte ao usuário", cuja implementação de verdade é a pessoa.
+    """
+
+    type: Literal["approve", "edit", "reject", "respond"]
+    # Para "edit": nome e argumentos corrigidos da tool.
+    name: str | None = None
+    args: dict[str, Any] | None = None
+    # Para "reject": o motivo. Para "respond": o conteúdo da resposta.
+    message: str | None = None
+
+
 class ResumeRequest(BaseModel):
-    """Responde a um interrupt (o agent pediu aprovação humana)."""
+    """Responde a um interrupt (o agent pediu aprovação humana).
+
+    É uma LISTA porque um interrupt pode trazer várias `action_requests` de uma
+    vez — o modelo pode pedir duas tool calls no mesmo passo. O middleware exige
+    exatamente uma decisão por action_request, na mesma ordem.
+    """
 
     session_id: uuid.UUID
-    decision: Literal["approve", "edit", "reject"]
-    # Para "edit": os argumentos corrigidos da tool. Para "reject": o motivo.
-    args: dict[str, Any] | None = None
-    message: str | None = None
+    decisions: list[DecisionIn] = Field(min_length=1)
+
+
+class ElicitAnswerRequest(BaseModel):
+    """Responde a uma elicitation do MCP (pergunta feita DENTRO da tool call).
+
+    Não confundir com `ResumeRequest`: aqui não há retomada de grafo nenhuma. O
+    grafo nunca parou — ele está bloqueado dentro da tool call, esperando este
+    valor chegar pela memória do processo.
+    """
+
+    elicitation_id: str
+    action: Literal["accept", "decline", "cancel"]
+    # Só usado com "accept": os campos do formulário, conforme o schema pedido.
+    content: dict[str, Any] | None = None
 
 
 class MessageOut(BaseModel):
