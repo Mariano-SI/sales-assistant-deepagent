@@ -9,3 +9,14 @@ __pycache__/
 # Notas de arquitetura / explicações — ficam só no disco.
 DOCS.md
 api/README.md
+
+# Caixa de correio gerada em runtime pelo mock MCP (re-semeada de mcp/seeds/).
+mcp/mail_store.json
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+.api.pid
+.api.log
