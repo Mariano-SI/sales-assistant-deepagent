@@ -75,7 +75,15 @@ async def build_agent(
 
     return create_deep_agent(
         model=strong_model,
-        tools=[*mail_tools, render_pie_chart, markdown_to_html],
+        # As tools de e-mail NÃO entram aqui de propósito. Elas vivem só no
+        # inbox-manager, que é quem tem o gate de aprovação em
+        # `mail_create_draft`. Colocá-las também no agent principal abre um
+        # caminho sem gate: o principal chama `mail_create_draft` direto e o
+        # rascunho é salvo sem ninguém aprovar — e, de quebra, o subagent
+        # general-purpose herda as tools do principal, então o desvio existiria
+        # por duas vias. Mesma razão pela qual `add_customer` só existe no
+        # chinook-analyst. Ver AGENTS.md: "You have no email tools yourself."
+        tools=[render_pie_chart, markdown_to_html],
         system_prompt=SYSTEM_PROMPT,
         skills=["/skills"],
         subagents=build_subagents(
