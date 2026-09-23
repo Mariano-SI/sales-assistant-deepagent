@@ -29,6 +29,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from agent import build_agent
 from api.config import settings
+from api.elicitation import on_elicitation
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,11 @@ class AgentRuntime:
         # checkpoint_migrations. Você não escreve migration para essas tabelas.
         await self._saver.setup()
 
-        self._graph = await build_agent(checkpointer=self._saver)
+        # A ponte de elicitation entra aqui: o agent passa a saber perguntar, e
+        # quem responde é o browser via POST /chat/elicit.
+        self._graph = await build_agent(
+            checkpointer=self._saver, on_elicitation=on_elicitation
+        )
         logger.info("Agent compilado e checkpointer pronto.")
 
     async def shutdown(self) -> None:

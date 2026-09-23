@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # Streaming: por padrão só os tokens do agent principal vão pro cliente.
     stream_subagent_tokens: bool = False
 
+    # Quanto tempo uma elicitation do MCP espera por uma resposta humana antes
+    # de desistir (e devolver "cancel" ao servidor). Precisa existir: essa
+    # pausa vive na MEMÓRIA do processo, não no checkpoint, então um usuário
+    # que fecha a aba deixaria a tool call aberta para sempre.
+    elicitation_timeout: float = 300.0
+
     @property
     def sqlalchemy_url(self) -> str:
         """Mesmo banco, mas com o driver async que o SQLAlchemy precisa."""

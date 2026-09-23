@@ -17,11 +17,16 @@ from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api import repository, service
+from api import elicitation, repository, service
 from api.db import SessionLocal, get_db
 from api.deps import get_graph
 from api.models import Conversation
-from api.schemas import ChatRequest, ChatResponse, ResumeRequest
+from api.schemas import (
+    ChatRequest,
+    ChatResponse,
+    ElicitAnswerRequest,
+    ResumeRequest,
+)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -127,7 +132,68 @@ async def resume(
     Postgres esperando.
     """
     conversation = await _resolve_conversation(db, payload.session_id)
-    command = service.build_resume_command(
-        payload.decision, args=payload.args, message=payload.message
-    )
+    command = service.build_resume_command(payload.decisions)
     return await service.run_turn(graph, db, conversation, resume=command)
+
+
+@router.post("/resume/stream")
+async def resume_stream(
+    payload: ResumeRequest,
+    db: AsyncSession = Depends(get_db),
+    graph: CompiledStateGraph = Depends(get_graph),
+) -> StreamingResponse:
+    """O mesmo resume, em SSE.
+
+    Existe porque depois de aprovar uma tool o agent normalmente ainda tem
+    trabalho a fazer — e o usuário quer ver a resposta sendo escrita, igual a
+    um turno normal. Sem isto a UI aprovaria e ficaria olhando para um spinner
+    até o turno inteiro terminar.
+
+    É também o caminho por onde uma elicitation pode aparecer depois de uma
+    aprovação, já que só o stream tem canal para exibi-la.
+    """
+    conversation = await _resolve_conversation(db, payload.session_id)
+    conversation_id = conversation.id
+    command = service.build_resume_command(payload.decisions)
+
+    async def generate() -> AsyncIterator[str]:
+        async with SessionLocal() as stream_db:
+            conv = await repository.get_conversation(stream_db, conversation_id)
+            async for frame in service.stream_turn(
+                graph, stream_db, conv, resume=command
+            ):
+                yield frame
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream", headers=SSE_HEADERS
+    )
+
+
+@router.post("/elicit", status_code=status.HTTP_202_ACCEPTED)
+async def elicit(payload: ElicitAnswerRequest) -> dict[str, str]:
+    """Responde a uma elicitation do MCP que está em voo.
+
+    Repare no que este handler NÃO faz: não toca no banco, não recebe o grafo,
+    não roda turno nenhum. Ele só solta um `asyncio.Future` que está sendo
+    aguardado dentro de uma tool call ainda aberta, em outro request.
+
+    Daí o 202 em vez de 200: aceitamos a resposta e devolvemos na hora. O
+    resultado do trabalho continua saindo pelo stream do turno original, não
+    por aqui.
+
+    409 quando a elicitation não existe mais — expirou pelo timeout, ou a
+    resposta chegou duas vezes. Não é erro do cliente (400) nem ausência de
+    rota (404): é um conflito de estado, a pergunta já não está mais de pé.
+    """
+    ok = elicitation.answer(
+        payload.elicitation_id, action=payload.action, content=payload.content
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Elicitation {payload.elicitation_id} não está mais pendente "
+                "(expirou ou já foi respondida)."
+            ),
+        )
+    return {"status": "accepted"}
